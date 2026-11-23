@@ -1,6 +1,6 @@
 # HAI Dashboard: US State, County, and Hospital Performance, 2025
 An interactive Tableau dashboard exploring HAI performance across the US, with drill-down from state to county to individual hospital. Built from public CMS data with a reproducible R pipeline.
-# Live dashboard: https://public.tableau.com/app/profile/evan.heffelfinger/viz/HAIDashboard_17954062271410/HAIDashboard#2
+Live dashboard: https://public.tableau.com/app/profile/evan.heffelfinger/viz/HAIDashboard_17954062271410/HAIDashboard#2
 # What it shows
 For one infection at a time (CLABSI, CAUTI, C. diff, MRSA, SSI-colon surgery, SSI-abdominal hysterectomy), the dashboard classifies each state, county, and hospital as better than expected, no clear difference, or worse than expected.
 Data
