@@ -87,7 +87,7 @@ R (readr, dplyr, tidyr, stringr), Tableau Public.
 
 Author
 
-Evan Heffelfinger, MS Epidemiology candidate, University of Pittsburgh [LinkedIn link]
+Evan M. Heffelfinger
 
 License and data use
 
