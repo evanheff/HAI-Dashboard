@@ -1,0 +1,153 @@
+```{r}
+library(readr)
+library(dplyr)
+library(tidyr)
+library(stringr)
+dir.create("data/clean", recursive = TRUE, showWarnings = FALSE)
+```
+
+```{r}
+ALPHA <- 0.05
+MIN_PRED <- 0.0
+```
+```{r}
+# ---- 1. Read everything as character so nothing is silently converted ------
+hai_raw <- read_csv('/Users/evanheffelfinger/Library/CloudStorage/OneDrive-UniversityofPittsburgh/HAI Dashboard/Healthcare_Associated_Infections-Hospital.csv',
+                    col_types = cols(.default = "c"))
+gen_raw <- read_csv('/Users/evanheffelfinger/Library/CloudStorage/OneDrive-UniversityofPittsburgh/HAI Dashboard/Hospital_General_Information_2.csv',
+                    col_types = cols(.default = "c"))
+
+infection_labels <- c(
+  "1" = "CLABSI", "2" = "CAUTI", "3" = "SSI - Colon surgery",
+  "4" = "SSI - Abdominal hysterectomy", "5" = "MRSA bacteremia",
+  "6" = "C. difficile"
+)
+```
+```{r}
+# ---- 2. Long -> one row per hospital x infection ---------------------------
+hai <- hai_raw |>
+  mutate(
+    measure_num = str_match(`Measure ID`, "^HAI_(\\d)_")[, 2],
+    measure_stat = str_remove(`Measure ID`, "^HAI_\\d_"),
+    value = suppressWarnings(as.numeric(Score))   # "Not Available" -> NA
+  )
+
+# SIR-row metadata (CMS comparison category + footnote live on every row,
+# but take them from the SIR row to avoid confusion)
+sir_meta <- hai |>
+  filter(measure_stat == "SIR") |>
+  transmute(`Facility ID`, measure_num,
+            compared_to_national = `Compared to National`,
+            footnote = Footnote)
+
+wide <- hai |>
+  select(`Facility ID`, measure_num, measure_stat, value) |>
+  pivot_wider(names_from = measure_stat, values_from = value,
+              values_fn = first) |>
+  rename(sir = SIR, observed = NUMERATOR, predicted = ELIGCASES,
+         ci_lower = CILOWER, ci_upper = CIUPPER, exposure = DOPC)
+
+fac <- hai |>
+  distinct(`Facility ID`, `Facility Name`, `City/Town`, State, `ZIP Code`,
+           `County/Parish`) |>
+  rename(facility_id = `Facility ID`, facility_name = `Facility Name`,
+         city = `City/Town`, state = State, zip = `ZIP Code`,
+         county = `County/Parish`)
+
+gen <- gen_raw |>
+  transmute(facility_id = `Facility ID`,
+            hospital_type = `Hospital Type`,
+            ownership = `Hospital Ownership`,
+            overall_rating = `Hospital overall rating`)
+
+hospital_level <- wide |>
+  rename(facility_id = `Facility ID`) |>
+  left_join(sir_meta |> rename(facility_id = `Facility ID`),
+            by = c("facility_id", "measure_num")) |>
+  left_join(fac, by = "facility_id") |>
+  left_join(gen, by = "facility_id") |>
+  mutate(
+    infection = unname(infection_labels[measure_num]),
+    has_sir = !is.na(sir),
+    is_state_or_dc = !state %in% c("AS", "GU", "MP", "PR", "VI"),
+    county_key = paste0(str_to_title(county), ", ", state)
+  ) |>
+  # keep only hospital-infection pairs with usable counts
+  filter(!is.na(observed), !is.na(predicted)) |>
+  select(facility_id, facility_name, city, state, county, county_key, zip,
+         hospital_type, ownership, overall_rating, infection, sir, ci_lower,
+         ci_upper, observed, predicted, exposure, has_sir,
+         compared_to_national, footnote, is_state_or_dc)
+```
+```{r}
+# ---- 3. Pooled SIR with exact Poisson CI --------------------------
+pool <- function(df, ...) {
+  df |>
+    group_by(..., infection) |>
+    summarise(n_hospitals = n(),
+              observed  = sum(observed),
+              predicted = sum(predicted),
+              .groups = "drop") |>
+    filter(predicted > 0) |>
+    mutate(
+      sir = observed / predicted,
+      ci_lower = if_else(observed == 0, 0,
+                         qchisq(ALPHA / 2, 2 * observed) / 2 / predicted),
+      ci_upper = qchisq(1 - ALPHA / 2, 2 * (observed + 1)) / 2 / predicted,
+      reliable = predicted >= MIN_PRED,
+      sir_mapped = if_else(reliable, sir, NA_real_),
+      category = case_when(
+        ci_upper < 1 ~ "Better than expected",
+        ci_lower > 1 ~ "Worse than expected",
+        TRUE ~ "No clear difference"
+      )
+    )
+}
+
+state_pooled  <- hospital_level |> filter(is_state_or_dc) |> pool(state)
+county_pooled <- hospital_level |> filter(is_state_or_dc) |> pool(state, county_key)
+```
+```{r}
+# ---- 4. Combine and  Write outputs -------------------------------------------------------
+state_join <- state_pooled |>
+  select(state, infection,
+         state_n_hosp = n_hospitals, 
+         state_obs = observed,
+         state_pred = predicted, 
+         state_sir = sir,
+         state_ci_lower = ci_lower, 
+         state_ci_upper = ci_upper,
+         state_category = category)
+county_join <- county_pooled |>
+  select(state, county_key, infection,
+         county_n_hosp = n_hospitals, 
+         county_obs = observed,
+         county_pred = predicted,
+         county_sir = sir,
+         county_ci_lower = ci_lower,
+         county_ci_upper = ci_upper,
+         county_category = category)
+dashboard_data <- hospital_level |>
+  left_join(state_join, by = c("state", "infection")) |>
+  left_join(county_join, by = c("state", "county_key", "infection"))
+stopifnot("join duplicated rows" = nrow(dashboard_data) == nrow(hospital_level))
+
+write_csv(dashboard_data, "data/clean/dashboard_data.csv", na = "")
+write_csv(hospital_level, "data/clean/hospital_level.csv", na = "")
+write_csv(state_pooled, "data/clean/state_pooled.csv", na = "")
+write_csv(county_pooled, "data/clean/county_pooled.csv", na = "")
+```
+```{r}
+# ---- 5. QA printouts (read these before moving on) --------------------------
+cat("\nHospital-infection rows kept:", nrow(hospital_level), "\n")
+cat("\nShare of predicted infections from hospitals WITHOUT a CMS SIR:\n")
+hospital_level |>
+  group_by(infection) |>
+  summarise(pct_pred_no_sir = round(100 * sum(predicted[!has_sir]) / sum(predicted), 1)) |>
+  print()
+cat("\nNational pooled SIR by infection (sanity check):\n")
+hospital_level |> pool() |> select(infection, observed, predicted, sir) |> print()
+cat("\nCounties with reliable pooled SIR, by infection:\n")
+county_pooled |> group_by(infection) |>
+  summarise(counties = n(), reliable = sum(reliable)) |> print()
+```
